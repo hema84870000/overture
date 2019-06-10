@@ -8,13 +8,12 @@ package cache
 // Cache that holds RRs.
 
 import (
+	"strconv"
 	"sync"
 	"time"
 
-	"strconv"
-
-	log "github.com/Sirupsen/logrus"
 	"github.com/miekg/dns"
+	log "github.com/sirupsen/logrus"
 )
 
 // Elem hold an answer and additional section that returned from the cache.
@@ -56,7 +55,7 @@ func (c *Cache) Remove(s string) {
 // Must be called under a write lock.
 func (c *Cache) EvictRandom() {
 	cacheLength := len(c.table)
-	if cacheLength < c.capacity {
+	if cacheLength <= c.capacity {
 		return
 	}
 	i := c.capacity - cacheLength
@@ -71,15 +70,21 @@ func (c *Cache) EvictRandom() {
 
 // InsertMessage inserts a message in the Cache. We will cache it for ttl seconds, which
 // should be a small (60...300) integer.
-func (c *Cache) InsertMessage(s string, m *dns.Msg) {
-	if c.capacity <= 0 || m == nil || len(m.Answer) == 0 {
+func (c *Cache) InsertMessage(s string, m *dns.Msg, mTTL uint32) {
+	if c.capacity <= 0 || m == nil {
 		return
 	}
 
 	c.Lock()
-	ttl := time.Duration(m.Answer[0].Header().Ttl) * time.Second
+	var ttl uint32
+	if len(m.Answer) == 0 {
+		ttl = mTTL
+	} else {
+		ttl = m.Answer[0].Header().Ttl
+	}
+	ttlDuration := time.Duration(ttl) * time.Second
 	if _, ok := c.table[s]; !ok {
-		c.table[s] = &elem{time.Now().UTC().Add(ttl), m.Copy()}
+		c.table[s] = &elem{time.Now().UTC().Add(ttlDuration), m.Copy()}
 	}
 	log.Debug("Cached: " + s)
 	c.EvictRandom()
@@ -88,6 +93,7 @@ func (c *Cache) InsertMessage(s string, m *dns.Msg) {
 
 // Search returns a dns.Msg, the expiration time and a boolean indicating if we found something
 // in the cache.
+// todo: use finder implementation
 func (c *Cache) Search(s string) (*dns.Msg, time.Time, bool) {
 	if c.capacity <= 0 {
 		return nil, time.Time{}, false
@@ -118,6 +124,9 @@ func (c *Cache) Hit(key string, msgid uint16) *dns.Msg {
 			m.Compress = true
 			// Even if something ended up with the TC bit *in* the cache, set it to off
 			m.Truncated = false
+			for _, a := range m.Answer {
+				a.Header().Ttl = uint32(time.Since(exp).Seconds() * -1)
+			}
 			return m
 		}
 		// Expired! /o\
